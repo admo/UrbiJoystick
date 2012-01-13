@@ -2,7 +2,7 @@ set(URBI_ROOT_DIR "/usr" CACHE PATH "Urbi root directory.")
 
 find_package (Urbi REQUIRED)
 find_package (SDL REQUIRED)
-find_package (Boost REQUIRED thread date_time)
+find_package (Boost REQUIRED thread)
 
 link_directories (${BOOST_LIBRARYDIR})
 
