@@ -4,9 +4,9 @@
 #include <map>
 #include <algorithm>
 
-#include <boost/bind.hpp>
 #include <boost/ptr_container/ptr_vector.hpp>
 #include <boost/noncopyable.hpp>
+#include <boost/thread.hpp>
 
 #include <urbi/uobject.hh>
 
@@ -17,10 +17,28 @@ using namespace std;
 using namespace boost;
 
 class UJoystick: public UObject {
-	friend class SDLJoystickThreadSingleton;
 public:
 	UJoystick(const string&);
 	virtual ~UJoystick();
+
+	UVar& getAxis(int n);
+	const UVar& getAxis(int n) const;
+	UVar& getBallDX(int n);
+	const UVar& getBallDX(int n) const;
+	UVar& getBallDY(int n);
+	const UVar& getBallDY(int n) const;
+	UVar& getButton(int n);
+	const UVar& getButton(int n) const;
+	UVar& getHat(int n);
+	const UVar& getHat(int n) const;
+	UVar& getName();
+	const UVar& getName() const;
+
+	void addAxes(int numAxes);
+	void addBalls(int numBalls);
+	void addHats(int numHats);
+	void addButtons(int numButtons);
+	void addJoystickName(const string& name);
 
 private:
 	void init(int);
@@ -28,7 +46,8 @@ private:
 	int mJoystickNum;
 
 	ptr_vector<UVar> mAxes;
-	ptr_vector<UVar> mBalls;
+	ptr_vector<UVar> mBallsDX;
+	ptr_vector<UVar> mBallsDY;
 	ptr_vector<UVar> mHats;
 	ptr_vector<UVar> mButtons;
 
@@ -39,11 +58,6 @@ private:
 	UVar numButtons;
 
 	void addUVars(ptr_vector<UVar>& container, const string prefix, int num);
-	void addAxes(int numAxes);
-	void addBalls(int numBalls);
-	void addHats(int numHats);
-	void addButtons(int numButtons);
-	void addJoystickName(const string& name);
 };
 
 class SDLJoystickThreadSingleton: public noncopyable {
@@ -54,8 +68,10 @@ private:
 
 	JoysticksMap mUJosticks;
 
-	boost::thread mThread;
+	thread mThread;
+	mutex mMutex;
 	void threadFunction();
+	void stopThreadFunction();
 
 public:
 	~SDLJoystickThreadSingleton();
@@ -84,10 +100,6 @@ SDLJoystickThreadSingleton::~SDLJoystickThreadSingleton() {
 			<< "SDLJoystickThreadSingleton::~SDLJoystickThreadSingleton() destroying object"
 			<< endl;
 	// Zastopuj wątek
-	mThread.interrupt();
-	SDL_Event event;
-	SDL_PushEvent(&event);
-	mThread.join();
 	for (JoysticksMap::iterator i = mUJosticks.begin(); i != mUJosticks.end();
 			++i) {
 		unregisterJoystick(i->first);
@@ -106,6 +118,7 @@ void SDLJoystickThreadSingleton::registerJoystick(UJoystick* uobject,
 	cerr
 			<< "SDLJoystickThreadSingleton::registerJoystick(int) registering joystick "
 			<< joystickNum << endl;
+	lock_guard<mutex> lockGuard(mMutex);
 	// Sprawdź czy joystick istnieje
 	if (!(joystickNum < SDL_NumJoysticks())) {
 		stringstream ss;
@@ -134,7 +147,8 @@ void SDLJoystickThreadSingleton::registerJoystick(UJoystick* uobject,
 	// Zapisz obiekt
 	mUJosticks[joystickNum] = make_pair(joystick, uobject);
 	// Uruchom wątek jeśli jeszcze nie uruchomiony
-	mThread = thread(&SDLJoystickThreadSingleton::threadFunction, this);
+	if (mUJosticks.size() == 1)
+		mThread = thread(&SDLJoystickThreadSingleton::threadFunction, this);
 }
 
 void SDLJoystickThreadSingleton::unregisterJoystick(int joystickNum) {
@@ -143,51 +157,69 @@ void SDLJoystickThreadSingleton::unregisterJoystick(int joystickNum) {
 			<< joystickNum << endl;
 	SDL_JoystickClose(mUJosticks[joystickNum].first);
 	mUJosticks.erase(joystickNum);
+	if (mUJosticks.size() == 0)
+		stopThreadFunction();
 }
 
 void SDLJoystickThreadSingleton::threadFunction() {
-	cerr << "SDLJoystickThreadSingleton::threadFunction() starting event thread"
+	cerr << "SDLJoystickThreadSingleton::threadFunction() entering into the event loop"
 			<< endl;
 	try {
 		SDL_Event event;
 		while (SDL_WaitEvent(&event)) {
 			this_thread::interruption_point();
+			lock_guard<mutex> lockGuard(mMutex);
 			switch (event.type) {
 			case SDL_JOYAXISMOTION:
-				mUJosticks[event.jaxis.which].second->mAxes[event.jaxis.axis] =
+				mUJosticks[event.jaxis.which].second->getAxis(event.jaxis.axis) =
 						event.jaxis.value;
 				break;
 			case SDL_JOYBALLMOTION:
-//				mUJosticks[event.jball.which]->mBalls[event.jball.which]
+				mUJosticks[event.jball.which].second->getBallDX(event.jball.ball) = event.jball.xrel;
+				mUJosticks[event.jball.which].second->getBallDY(event.jball.ball) = event.jball.yrel;
+//				mBalls[event.jball.which]
 				break;
 			case SDL_JOYBUTTONUP:
 			case SDL_JOYBUTTONDOWN:
-				mUJosticks[event.jbutton.which].second->mButtons[event.jbutton.which] =
-						event.jbutton.state;
+				mUJosticks[event.jbutton.which].second->getButton(
+						event.jbutton.button) = event.jbutton.state;
 				break;
 			case SDL_JOYHATMOTION:
-				mUJosticks[event.jhat.which].second->mHats[event.jhat.which] =
+				mUJosticks[event.jhat.which].second->getHat(event.jhat.hat) =
 						event.jhat.value;
 				break;
 			}
 		}
 	} catch (thread_interrupted&) {
 		cerr
-				<< "SDLJoystickThreadSingleton::threadFunction() stopping event thread"
+				<< "SDLJoystickThreadSingleton::threadFunction() leaving the event loop"
 				<< endl;
 		return;
 	}
 }
 
+inline void SDLJoystickThreadSingleton::stopThreadFunction() {
+	cerr
+			<< "SDLJoystickThreadSingleton::stopThreadFunction() stopping event thread"
+			<< endl;
+	mThread.interrupt();
+	SDL_Event event;
+	SDL_PushEvent(&event);
+	mThread.join();
+}
+
 UJoystick::UJoystick(const string& name) :
-		UObject(name) {
+		UObject(name), mJoystickNum(-1) {
 	UBindFunction(UJoystick, init);
 }
 
 UJoystick::~UJoystick() {
 	cerr << "UJoystick::~UJoystick() destroying object for joystick "
 			<< mJoystickNum << endl;
-	SDLJoystickThreadSingleton::getInstance().unregisterJoystick(mJoystickNum);
+	if (mJoystickNum > -1) {
+		SDLJoystickThreadSingleton::getInstance().unregisterJoystick(
+				mJoystickNum);
+	}
 }
 
 void UJoystick::init(int joystickNum) {
@@ -195,10 +227,10 @@ void UJoystick::init(int joystickNum) {
 			<< joystickNum << endl;
 	UBindVars(UJoystick, name, numAxes, numBalls, numButtons, numHats);
 
-	mJoystickNum = joystickNum;
-
 	SDLJoystickThreadSingleton::getInstance().registerJoystick(this,
-			mJoystickNum);
+			joystickNum);
+
+	mJoystickNum = joystickNum;
 }
 
 inline void UJoystick::addUVars(ptr_vector<UVar>& container,
@@ -221,7 +253,8 @@ inline void UJoystick::addAxes(int numAxes) {
 inline void UJoystick::addBalls(int numBalls) {
 	cerr << "UJoystick::addBalls(int) adding " << numBalls << " balls" << endl;
 	this->numBalls = numBalls;
-	addUVars(mBalls, "ball", numBalls);
+	addUVars(mBallsDX, "ballDX", numBalls);
+	addUVars(mBallsDY, "ballDY", numBalls);
 }
 
 inline void UJoystick::addHats(int numHats) {
@@ -239,6 +272,54 @@ inline void UJoystick::addButtons(int numButtons) {
 
 inline void UJoystick::addJoystickName(const string& name) {
 	this->name = name;
+}
+
+inline UVar& UJoystick::getAxis(int n) {
+	return mAxes[n];
+}
+
+inline const UVar& UJoystick::getAxis(int n) const {
+	return mAxes[n];
+}
+
+inline UVar& UJoystick::getBallDX(int n) {
+	return mBallsDX[n];
+}
+
+inline const UVar& UJoystick::getBallDX(int n) const {
+	return mBallsDX[n];
+}
+
+inline UVar& UJoystick::getBallDY(int n) {
+	return mBallsDY[n];
+}
+
+inline const UVar& UJoystick::getBallDY(int n) const {
+	return mBallsDY[n];
+}
+
+inline UVar& UJoystick::getButton(int n) {
+	return mButtons[n];
+}
+
+inline const UVar& UJoystick::getButton(int n) const {
+	return mButtons[n];
+}
+
+inline UVar& UJoystick::getHat(int n) {
+	return mHats[n];
+}
+
+inline const UVar& UJoystick::getHat(int n) const {
+	return mHats[n];
+}
+
+inline UVar& UJoystick::getName() {
+	return name;
+}
+
+const inline UVar& UJoystick::getName() const {
+	return name;
 }
 
 UStart(UJoystick);
